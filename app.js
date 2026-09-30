@@ -1,5 +1,6 @@
 import { zipSync } from 'fflate';
 import { inspectFont, convertFont } from './font-core.js';
+import { approximateCffToTtf, approximateEligibility } from './approx-cff.js';
 
 const $ = id => document.getElementById(id);
 let items = [];
@@ -38,24 +39,33 @@ function render() {
         select.append(opt);
       }
       select.value = String(item.faceIndex);
+      select.disabled = busy;
       select.addEventListener('change', () => { item.faceIndex = Number(select.value); updateNote(); });
       label.append(select); row.append(label);
     }
     const remove = document.createElement('button'); remove.className = 'remove'; remove.type = 'button';
     remove.setAttribute('aria-label', `移除 ${item.file.name}`); remove.textContent = '移除';
-    remove.addEventListener('click', () => { items.splice(i, 1); render(); status(items.length ? `已选择 ${items.length} 个字体` : '等待导入字体。'); });
+    remove.disabled = busy;
+    remove.addEventListener('click', () => { if (busy) return; items.splice(i, 1); render(); status(items.length ? `已选择 ${items.length} 个字体` : '等待导入字体。'); });
     row.append(remove); list.append(row);
   }
   $('fileCount').textContent = items.length ? `${items.length} 个文件` : '尚未导入';
   $('convert').disabled = !items.length || busy;
   $('clear').hidden = !items.length;
+  $('clear').disabled = busy;
+  $('target').disabled = busy;
+  $('approxConsent').disabled = busy;
+  $('pick').disabled = busy;
+  $('files').disabled = busy;
   updateNote();
 }
 function updateNote() {
   const target = $('target').value;
+  const approximate = items.filter(x => target === 'ttf' && x.info.faces.find(f => f.index === x.faceIndex)?.kind === 'otf');
+  $('approxArea').hidden = !approximate.length;
   const incompatible = items.filter(x => (x.info.signedCollection && target !== x.info.format) || (x.info.format !== target && target !== 'ttc' && !(target === 'otf' && x.info.faces.find(f => f.index === x.faceIndex)?.kind === 'ttf') && x.info.faces.find(f => f.index === x.faceIndex)?.kind !== target));
   $('note').textContent = incompatible.length
-    ? `注意：${incompatible.length} 个文件无法无损转换为 ${target.toUpperCase()}；点击转换会说明并停止。`
+    ? `注意：${incompatible.length} 个文件无法无损转换为 ${target.toUpperCase()}；默认停止。${approximate.length ? '若需要 TTF，可在下方主动选择近似转换。' : ''}`
     : '保留原始字形和彩色、可变字体表。TTF 转 OTF 按 OpenType 规范保留 TrueType 轮廓（不是重绘成 CFF）；TTC 转单字体时只导出选定的字体面。';
   $('note').classList.toggle('warning', Boolean(incompatible.length));
 }
@@ -83,15 +93,24 @@ function download(bytes, name, type) {
 }
 async function exportFiles() {
   if (!items.length || busy) return;
-  busy = true; render();
   const target = $('target').value;
+  const approximate = items.filter(x => target === 'ttf' && x.info.faces.find(f => f.index === x.faceIndex)?.kind === 'otf');
+  const optedIn = Boolean(approximate.length && $('approxConsent').checked);
+  if (optedIn && !window.confirm(`将近似转换 ${approximate.length} 份 OTF 字体：必须重新拟合曲线，细节和提示信息可能变化；不能承诺与原版完全一致。原件不会修改。确认继续吗？`)) return;
+  busy = true; render();
   status('正在核对字体内容，请稍候…');
   try {
     const names = outputNames(items, target), output = [];
     let total = 0;
     for (const [index, item] of items.entries()) {
       let data;
-      try { data = convertFont(item.data, target, item.faceIndex); }
+      try {
+        if (optedIn && approximate.includes(item)) {
+          const otf = item.info.format === 'ttc' ? convertFont(item.data, 'otf', item.faceIndex) : item.data;
+          approximateEligibility(otf);
+          data = await approximateCffToTtf(otf, message => status(`${item.file.name}：${message}`));
+        } else data = convertFont(item.data, target, item.faceIndex);
+      }
       catch (error) { throw Error(`${item.file.name}：${error.message}`); }
       total += data.length;
       if (total > limit) throw Error('导出总大小超过 384 MB，已停止打包');
@@ -103,16 +122,16 @@ async function exportFiles() {
       const zip = zipSync(Object.fromEntries(output), { level: 0 });
       download(zip, `字体格式转换_${target.toUpperCase()}.zip`, 'application/zip');
     }
-    status(`已导出 ${output.length} 个 ${target.toUpperCase()} 字体${output.length > 1 ? '（ZIP 压缩包）' : ''}。`);
+    status(`已导出 ${output.length} 个 ${target.toUpperCase()} 字体${output.length > 1 ? '（ZIP 压缩包）' : ''}。${optedIn ? '近似转换可能与原版有细微差异，请先试装验证。' : ''}`);
   } catch (error) {
     status(`没有导出：${error.message}。原始文件未修改。`, true);
-  } finally { busy = false; render(); }
+  } finally { if (optedIn) $('approxConsent').checked = false; busy = false; render(); }
 }
 $('pick').addEventListener('click', () => $('files').click());
 $('files').addEventListener('change', event => { importFiles(event.target.files); event.target.value = ''; });
-$('target').addEventListener('change', render);
+$('target').addEventListener('change', () => { $('approxConsent').checked = false; render(); });
 $('convert').addEventListener('click', exportFiles);
-$('clear').addEventListener('click', () => { items = []; render(); status('已清空选择，原始文件未修改。'); });
+$('clear').addEventListener('click', () => { if (busy) return; items = []; render(); status('已清空选择，原始文件未修改。'); });
 const drop = $('drop');
 for (const eventName of ['dragenter', 'dragover']) drop.addEventListener(eventName, e => { e.preventDefault(); drop.classList.add('over'); });
 for (const eventName of ['dragleave', 'drop']) drop.addEventListener(eventName, e => { e.preventDefault(); drop.classList.remove('over'); });
