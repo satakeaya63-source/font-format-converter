@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { Script } from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { inspectFont, convertFont } from './font-core.js';
+import { approximateEligibility } from './approx-cff.js';
 const ttf = new Uint8Array(await readFile('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'));
 const otf = new Uint8Array(await readFile('/usr/share/fonts/opentype/tlwg/Loma-Oblique.otf'));
 const ttc = new Uint8Array(await readFile('/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc'));
@@ -49,6 +50,26 @@ for (const key of ['CBDT', 'CBLC']) {
   assert.deepEqual(colorStandalone.subarray(restored.offset, restored.offset + restored.length), colorFont.subarray(original.offset, original.offset + original.length));
 }
 assert.deepEqual(convertFont(colorFont, 'otf'), colorFont, '彩色字体变为 OpenType/TrueType 不应修改任何字节');
+const vectorColor = new Uint8Array(await readFile('fixtures/cff-colr-v0.otf'));
+const vectorTables = inspectFont(vectorColor).faces[0].tables;
+assert.ok(approximateEligibility(vectorColor), '静态 CFF + COLR v0/CPAL 可经风险确认转换');
+function mutateTable(tag, edit) {
+  const altered = vectorColor.slice();
+  const table = vectorTables.get(tag);
+  edit(new DataView(altered.buffer), table.offset, altered);
+  return altered;
+}
+assert.throws(() => approximateEligibility(mutateTable('COLR', (view, offset) => view.setUint16(offset, 1))), /仅支持 COLR v0/);
+assert.throws(() => approximateEligibility(mutateTable('CPAL', (view, offset) => view.setUint16(offset, 2))), /仅支持 COLR v0/);
+for (const [missing, other] of [['COLR', 'CPAL'], ['CPAL', 'COLR']]) {
+  const altered = vectorColor.slice();
+  const tagBytes = Array.from(missing, char => char.charCodeAt(0));
+  for (let i = 0, n = new DataView(altered.buffer).getUint16(4); i < n; i++) {
+    const at = 12 + 16 * i;
+    if (tagBytes.every((byte, k) => altered[at + k] === byte)) { altered.set([84, 69, 83, 84], at); break; }
+  }
+  assert.throws(() => approximateEligibility(altered), /彩色矢量层或调色板不完整/, `${other} 单独存在必须拒绝`);
+}
 const unsignedCollection = convertFont(ttf, 'ttc');
 const signedCollection = new Uint8Array(unsignedCollection.length + 12 + 32);
 signedCollection.set(unsignedCollection.subarray(16), 28);
