@@ -1,0 +1,10 @@
+import { build } from 'esbuild';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+const js = (await build({ entryPoints: ['app.js'], bundle: true, format: 'iife', platform: 'browser', write: false, minify: true, legalComments: 'none' })).outputFiles[0].text.replaceAll('</script', '<\\/script');
+const template = await readFile('template.html', 'utf8');
+if (!template.includes('/* __APP_JS__ */')) throw Error('缺少内联脚本插槽');
+const html = template.replace('/* __APP_JS__ */', js);
+await mkdir('dist', { recursive: true });
+await writeFile('字体格式转换器.html', html);
+await writeFile('dist/index.html', html);
+console.log(`生成单文件 ${Buffer.byteLength(html)} 字节`);
